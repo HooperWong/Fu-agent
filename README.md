@@ -1,2 +1,0 @@
-# Fu-agent
-fu agent
