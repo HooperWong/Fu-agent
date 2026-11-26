@@ -1,0 +1,1275 @@
+/**
+ * Preload 脚本
+ *
+ * 通过 contextBridge 安全地将 API 暴露给渲染进程
+ * 使用上下文隔离确保安全性
+ */
+
+import { contextBridge, ipcRenderer } from 'electron'
+import { IPC_CHANNELS, CHANNEL_IPC_CHANNELS, CHAT_IPC_CHANNELS, AGENT_IPC_CHANNELS, ENVIRONMENT_IPC_CHANNELS, PROXY_IPC_CHANNELS, GITHUB_RELEASE_IPC_CHANNELS, SYSTEM_PROMPT_IPC_CHANNELS, MEMORY_IPC_CHANNELS } from '@proma/shared'
+import { USER_PROFILE_IPC_CHANNELS, SETTINGS_IPC_CHANNELS, SECURITY_IPC_CHANNELS, EFFICIENCY_IPC_CHANNELS, NOTE_IPC_CHANNELS, PREVIEW_IPC_CHANNELS, SAP_IPC_CHANNELS, DATA_IPC_CHANNELS } from '../types'
+import type {
+  RuntimeStatus,
+  GitRepoStatus,
+  Channel,
+  ChannelCreateInput,
+  ChannelUpdateInput,
+  ChannelTestResult,
+  FetchModelsInput,
+  FetchModelsResult,
+  ConversationMeta,
+  ChatMessage,
+  ChatSendInput,
+  GenerateTitleInput,
+  StreamChunkEvent,
+  StreamReasoningEvent,
+  StreamCompleteEvent,
+  StreamErrorEvent,
+  StreamToolActivityEvent,
+  AttachmentSaveInput,
+  AttachmentSaveResult,
+  FileDialogResult,
+  RecentMessagesResult,
+  AgentSessionMeta,
+  AgentMessage,
+  AgentSendInput,
+  AgentStreamEvent,
+  AgentStreamCompletePayload,
+  AgentWorkspace,
+  AgentGenerateTitleInput,
+  AgentSaveFilesInput,
+  AgentSavedFile,
+  AgentCopyFolderInput,
+  GetTaskOutputInput,
+  GetTaskOutputResult,
+  StopTaskInput,
+  WorkspaceMcpConfig,
+  SkillMeta,
+  WorkspaceCapabilities,
+  FileEntry,
+  EnvironmentCheckResult,
+  ProxyConfig,
+  SystemProxyDetectResult,
+  GitHubRelease,
+  GitHubReleaseListOptions,
+  PermissionRequest,
+  PermissionResponse,
+  PromaPermissionMode,
+  AskUserRequest,
+  AskUserResponse,
+  SystemPromptConfig,
+  SystemPrompt,
+  SystemPromptCreateInput,
+  SystemPromptUpdateInput,
+  MemoryConfig,
+} from '@proma/shared'
+import type { UserProfile, AppSettings, SecretStatus, AuditEntry, ApprovalRequest, ApprovalResult } from '../types'
+import type {
+  Task,
+  Todo,
+  CalendarEvent,
+  Project,
+  ScheduledJob,
+  SchedulerRun,
+  TaskInput,
+  TodoInput,
+  EventInput,
+  ProjectInput,
+  JobInput,
+  Note,
+  NoteMeta,
+  NoteInput,
+  NoteGroup,
+  NoteGroupInput,
+  NoteSearchResult,
+  PlaygroundState,
+  SapEnvironment,
+  SapEnvironmentInput,
+  SapImportResult,
+  SapRuntimeStatus,
+  SapVendorResult,
+  SapWorkspaceBinding,
+  DataOverview,
+  DataTransferResult,
+} from '../types'
+
+/**
+ * 暴露给渲染进程的 API 接口定义
+ */
+export interface ElectronAPI {
+  // ===== 运行时相关 =====
+
+  /**
+   * 获取运行时状态
+   * @returns 运行时状态，包含 Bun、Git 等信息
+   */
+  getRuntimeStatus: () => Promise<RuntimeStatus | null>
+
+  /**
+   * 获取指定目录的 Git 仓库状态
+   * @param dirPath - 目录路径
+   * @returns Git 仓库状态
+   */
+  getGitRepoStatus: (dirPath: string) => Promise<GitRepoStatus | null>
+
+  // ===== 通用工具 =====
+
+  /** 在系统默认浏览器中打开外部链接 */
+  openExternal: (url: string) => Promise<void>
+
+  /** 获取本地版本更新日志（CHANGELOG.md 内容） */
+  getChangelog: () => Promise<string>
+
+  /** 获取上游分发声明（NOTICE.md） */
+  getAppNotice: () => Promise<string>
+
+  /** 获取第三方组件声明（THIRD-PARTY-NOTICES.md） */
+  getThirdPartyNotices: () => Promise<string>
+
+  /** 发送一条测试系统通知，返回是否支持 */
+  testNotification: () => Promise<boolean>
+
+  // ===== 数据目录与备份迁移 =====
+
+  /** 数据目录概览（路径、占用空间、文件数） */
+  getDataOverview: () => Promise<DataOverview>
+
+  /** 在文件管理器中打开数据目录 */
+  openDataDir: () => Promise<void>
+
+  /** 导出数据备份到用户选择的目录 */
+  exportDataBackup: (includeSecrets?: boolean) => Promise<DataTransferResult>
+
+  /** 将数据目录压缩为 ZIP 迁移包（导出前展示范围并确认） */
+  exportDataZip: (includeSecrets?: boolean) => Promise<DataTransferResult>
+
+  /** 从用户选择的备份目录恢复数据 */
+  importDataBackup: () => Promise<DataTransferResult>
+
+  // ===== 渠道管理相关 =====
+
+  /** 获取所有渠道列表（apiKey 保持加密态） */
+  listChannels: () => Promise<Channel[]>
+
+  /** 创建渠道（apiKey 为明文，主进程加密） */
+  createChannel: (input: ChannelCreateInput) => Promise<Channel>
+
+  /** 更新渠道 */
+  updateChannel: (id: string, input: ChannelUpdateInput) => Promise<Channel>
+
+  /** 删除渠道 */
+  deleteChannel: (id: string) => Promise<void>
+
+  /** 解密获取明文 API Key（仅在用户查看时调用） */
+  decryptApiKey: (channelId: string) => Promise<string>
+
+  /** 测试渠道连接 */
+  testChannel: (channelId: string) => Promise<ChannelTestResult>
+
+  /** 直接测试连接（无需已保存渠道，传入明文凭证） */
+  testChannelDirect: (input: FetchModelsInput) => Promise<ChannelTestResult>
+
+  /** 从供应商拉取可用模型列表（直接传入凭证，无需已保存渠道） */
+  fetchModels: (input: FetchModelsInput) => Promise<FetchModelsResult>
+
+  // ===== 对话管理相关 =====
+
+  /** 获取对话列表 */
+  listConversations: () => Promise<ConversationMeta[]>
+
+  /** 创建对话 */
+  createConversation: (title?: string, modelId?: string, channelId?: string) => Promise<ConversationMeta>
+
+  /** 获取对话消息 */
+  getConversationMessages: (id: string) => Promise<ChatMessage[]>
+
+  /** 获取对话最近 N 条消息（分页加载） */
+  getRecentMessages: (id: string, limit: number) => Promise<RecentMessagesResult>
+
+  /** 更新对话标题 */
+  updateConversationTitle: (id: string, title: string) => Promise<ConversationMeta>
+
+  /** 更新对话使用的模型/渠道 */
+  updateConversationModel: (id: string, modelId: string, channelId: string) => Promise<ConversationMeta>
+
+  /** 删除对话 */
+  deleteConversation: (id: string) => Promise<void>
+
+  /** 切换对话置顶状态 */
+  togglePinConversation: (id: string) => Promise<ConversationMeta>
+
+  /** 导出对话为 Markdown 文件 */
+  exportConversationMarkdown: (id: string, title: string) => Promise<string | null>
+
+  // ===== 消息发送 =====
+
+  /** 发送消息（触发 AI 流式响应） */
+  sendMessage: (input: ChatSendInput) => Promise<void>
+
+  /** 中止生成 */
+  stopGeneration: (conversationId: string) => Promise<void>
+
+  /** 删除指定消息 */
+  deleteMessage: (conversationId: string, messageId: string) => Promise<ChatMessage[]>
+
+  /** 从指定消息开始截断（包含该消息） */
+  truncateMessagesFrom: (
+    conversationId: string,
+    messageId: string,
+    preserveFirstMessageAttachments?: boolean,
+  ) => Promise<ChatMessage[]>
+
+  /** 更新上下文分隔线 */
+  updateContextDividers: (conversationId: string, dividers: string[]) => Promise<ConversationMeta>
+
+  /** 生成对话标题 */
+  generateTitle: (input: GenerateTitleInput) => Promise<string | null>
+
+  // ===== 附件管理相关 =====
+
+  /** 保存附件到本地 */
+  saveAttachment: (input: AttachmentSaveInput) => Promise<AttachmentSaveResult>
+
+  /** 读取附件（返回 base64 字符串） */
+  readAttachment: (localPath: string) => Promise<string>
+
+  /** 删除附件 */
+  deleteAttachment: (localPath: string) => Promise<void>
+
+  /** 打开文件选择对话框 */
+  openFileDialog: () => Promise<FileDialogResult>
+
+  /** 提取附件文档的文本内容 */
+  extractAttachmentText: (localPath: string) => Promise<string>
+
+  // ===== 用户档案相关 =====
+
+  /** 获取用户档案 */
+  getUserProfile: () => Promise<UserProfile>
+
+  /** 更新用户档案 */
+  updateUserProfile: (updates: Partial<UserProfile>) => Promise<UserProfile>
+
+  // ===== 应用设置相关 =====
+
+  /** 获取应用设置 */
+  getSettings: () => Promise<AppSettings>
+
+  /** 获取当前数据目录（设置页展示，帮助发现数据目录漂移） */
+  getDataDir: () => Promise<string>
+
+  /** 更新应用设置 */
+  updateSettings: (updates: Partial<AppSettings>) => Promise<AppSettings>
+
+  // ===== 安全相关 =====
+
+  /** 获取密钥配置状态（仅返回掩码） */
+  getSecretStatuses: () => Promise<SecretStatus[]>
+
+  /** 写入密钥到 .env（传空字符串表示删除） */
+  setSecret: (key: string, value: string) => Promise<SecretStatus[]>
+
+  /** 获取授权审计日志 */
+  getAuditLog: (limit?: number) => Promise<AuditEntry[]>
+
+  /** 主动请求用户授权（危险操作前调用） */
+  requestApproval: (request: ApprovalRequest) => Promise<ApprovalResult>
+
+  // ===== 效率模块 =====
+
+  efficiency: {
+    tasks: {
+      list: () => Promise<Task[]>
+      create: (input: TaskInput) => Promise<Task>
+      update: (id: string, patch: Partial<TaskInput>) => Promise<Task>
+      remove: (id: string) => Promise<void>
+    }
+    todos: {
+      list: () => Promise<Todo[]>
+      create: (input: TodoInput) => Promise<Todo>
+      update: (id: string, patch: Partial<TodoInput>) => Promise<Todo>
+      remove: (id: string) => Promise<void>
+    }
+    calendar: {
+      list: () => Promise<CalendarEvent[]>
+      create: (input: EventInput) => Promise<CalendarEvent>
+      update: (id: string, patch: Partial<EventInput>) => Promise<CalendarEvent>
+      remove: (id: string) => Promise<void>
+    }
+    projects: {
+      list: () => Promise<Project[]>
+      create: (input: ProjectInput) => Promise<Project>
+      update: (id: string, patch: Partial<ProjectInput>) => Promise<Project>
+      remove: (id: string) => Promise<void>
+    }
+    scheduler: {
+      list: () => Promise<ScheduledJob[]>
+      create: (input: JobInput) => Promise<ScheduledJob>
+      update: (id: string, patch: Partial<JobInput>) => Promise<ScheduledJob>
+      remove: (id: string) => Promise<void>
+      runNow: (id: string) => Promise<SchedulerRun>
+    }
+  }
+
+  // ===== 笔记模块 =====
+
+  notes: {
+    list: () => Promise<NoteMeta[]>
+    get: (id: string) => Promise<Note | null>
+    create: (input?: NoteInput) => Promise<Note>
+    update: (id: string, patch: NoteInput) => Promise<Note>
+    remove: (id: string) => Promise<void>
+    search: (query: string) => Promise<NoteSearchResult[]>
+    /** 导入图片，返回可直接插入 Markdown 的图片语法 */
+    importImage: (noteId: string, fileName: string, dataUrl: string) => Promise<string>
+    groups: {
+      list: () => Promise<NoteGroup[]>
+      create: (input: NoteGroupInput) => Promise<NoteGroup>
+      update: (id: string, patch: Partial<NoteGroupInput>) => Promise<NoteGroup>
+      remove: (id: string) => Promise<void>
+    }
+  }
+
+  // ===== 分栏代码预览 =====
+
+  preview: {
+    load: () => Promise<PlaygroundState>
+    save: (state: PlaygroundState) => Promise<void>
+  }
+
+  // ===== SAP 多环境（arc-1 MCP） =====
+
+  sap: {
+    list: () => Promise<SapEnvironment[]>
+    create: (input: SapEnvironmentInput) => Promise<SapEnvironment>
+    update: (id: string, patch: Partial<SapEnvironmentInput>) => Promise<SapEnvironment>
+    remove: (id: string) => Promise<void>
+    bindings: (workspaceSlug: string) => Promise<SapWorkspaceBinding[]>
+    apply: (workspaceSlug: string, envId: string) => Promise<void>
+    detach: (workspaceSlug: string, envId: string) => Promise<void>
+    importFromCodeBuddy: () => Promise<SapImportResult>
+    vendor: (envId: string) => Promise<SapVendorResult>
+    runtimeStatus: () => Promise<SapRuntimeStatus[]>
+  }
+
+  /** 获取系统主题（是否深色模式） */
+  getSystemTheme: () => Promise<boolean>
+
+  /** 订阅系统主题变化事件（返回清理函数） */
+  onSystemThemeChanged: (callback: (isDark: boolean) => void) => () => void
+
+  /** 订阅菜单导航到设置页事件（Cmd+, 快捷键） */
+  onNavigateSettings: (callback: () => void) => () => void
+  onNewConversation: (callback: () => void) => () => void
+
+  // ===== 环境检测相关 =====
+
+  /** 执行环境检测 */
+  checkEnvironment: () => Promise<EnvironmentCheckResult>
+
+  // ===== 代理配置相关 =====
+
+  /** 获取代理配置 */
+  getProxySettings: () => Promise<ProxyConfig>
+
+  /** 更新代理配置 */
+  updateProxySettings: (config: ProxyConfig) => Promise<void>
+
+  /** 检测系统代理 */
+  detectSystemProxy: () => Promise<SystemProxyDetectResult>
+
+  // ===== 流式事件订阅（返回清理函数） =====
+
+  /** 订阅内容片段事件 */
+  onStreamChunk: (callback: (event: StreamChunkEvent) => void) => () => void
+
+  /** 订阅推理片段事件 */
+  onStreamReasoning: (callback: (event: StreamReasoningEvent) => void) => () => void
+
+  /** 订阅流式完成事件 */
+  onStreamComplete: (callback: (event: StreamCompleteEvent) => void) => () => void
+
+  /** 订阅流式错误事件 */
+  onStreamError: (callback: (event: StreamErrorEvent) => void) => () => void
+
+  /** 订阅流式工具活动事件 */
+  onStreamToolActivity: (callback: (event: StreamToolActivityEvent) => void) => () => void
+
+  // ===== Agent 会话管理相关 =====
+
+  /** 获取 Agent 会话列表 */
+  listAgentSessions: () => Promise<AgentSessionMeta[]>
+
+  /** 创建 Agent 会话 */
+  createAgentSession: (title?: string, channelId?: string, workspaceId?: string) => Promise<AgentSessionMeta>
+
+  /** 获取 Agent 会话消息 */
+  getAgentSessionMessages: (id: string) => Promise<AgentMessage[]>
+
+  /** 更新 Agent 会话标题 */
+  updateAgentSessionTitle: (id: string, title: string) => Promise<AgentSessionMeta>
+
+  /** 删除 Agent 会话 */
+  deleteAgentSession: (id: string) => Promise<void>
+
+  /** 复制 / 派生探索会话（mode 默认 'copy'） */
+  duplicateAgentSession: (id: string, mode?: 'copy' | 'explore') => Promise<AgentSessionMeta>
+
+  /** 回退会话最近一轮对话（返回移除的消息条数） */
+  rollbackAgentSession: (id: string) => Promise<number>
+
+  /** 更新会话标记（待办 / 探索） */
+  setAgentSessionFlags: (id: string, flags: { isTodo?: boolean; isExplore?: boolean }) => Promise<AgentSessionMeta>
+
+  /** 导出 Agent 会话为 Markdown 文件 */
+  exportAgentSessionMarkdown: (id: string, title: string) => Promise<string | null>
+
+  /** 生成 Agent 会话标题 */
+  generateAgentTitle: (input: AgentGenerateTitleInput) => Promise<string | null>
+
+  /** 发送 Agent 消息 */
+  sendAgentMessage: (input: AgentSendInput) => Promise<void>
+
+  /** 中止 Agent 执行 */
+  stopAgent: (sessionId: string) => Promise<void>
+
+  // ===== Agent 后台任务管理 =====
+
+  /** 获取任务输出 */
+  getTaskOutput: (input: GetTaskOutputInput) => Promise<GetTaskOutputResult>
+
+  /** 停止任务 */
+  stopTask: (input: StopTaskInput) => Promise<void>
+
+  // ===== Agent 工作区管理相关 =====
+
+  /** 获取 Agent 工作区列表 */
+  listAgentWorkspaces: () => Promise<AgentWorkspace[]>
+
+  /** 创建 Agent 工作区 */
+  createAgentWorkspace: (name: string) => Promise<AgentWorkspace>
+
+  /** 更新 Agent 工作区 */
+  updateAgentWorkspace: (id: string, updates: { name: string }) => Promise<AgentWorkspace>
+
+  /** 删除 Agent 工作区 */
+  deleteAgentWorkspace: (id: string) => Promise<void>
+
+  // ===== 工作区能力（MCP + Skill） =====
+
+  /** 获取工作区能力摘要 */
+  getWorkspaceCapabilities: (workspaceSlug: string) => Promise<WorkspaceCapabilities>
+
+  /** 获取工作区 MCP 配置 */
+  getWorkspaceMcpConfig: (workspaceSlug: string) => Promise<WorkspaceMcpConfig>
+
+  /** 保存工作区 MCP 配置 */
+  saveWorkspaceMcpConfig: (workspaceSlug: string, config: WorkspaceMcpConfig) => Promise<void>
+
+  /** 测试 MCP 服务器连接 */
+  testMcpServer: (name: string, entry: import('@proma/shared').McpServerEntry) => Promise<{ success: boolean; message: string }>
+
+  /** 获取工作区 Skill 列表 */
+  getWorkspaceSkills: (workspaceSlug: string) => Promise<SkillMeta[]>
+
+  /** 删除工作区 Skill */
+  deleteWorkspaceSkill: (workspaceSlug: string, skillSlug: string) => Promise<void>
+
+  /** 把内置技能另存为个性化副本（返回新 slug） */
+  copyWorkspaceSkillAsPersonal: (workspaceSlug: string, skillSlug: string, newName: string) => Promise<string>
+
+  /** 扫描本机其他 Agent 的 MCP 配置与 Skill 目录 */
+  scanLocalCapabilities: (workspaceSlug: string) => Promise<import('@proma/shared').LocalCapabilityScanResult>
+
+  /** 导入 MCP 服务器到当前工作区 */
+  importMcpServers: (
+    workspaceSlug: string,
+    servers: Record<string, import('@proma/shared').McpServerEntry>,
+  ) => Promise<import('@proma/shared').ImportCapabilityResult>
+
+  /** 导入 Skill 目录到当前工作区 */
+  importSkills: (
+    workspaceSlug: string,
+    sources: Array<{ path: string; name: string }>,
+  ) => Promise<import('@proma/shared').ImportCapabilityResult>
+
+  /** 将会话沉淀到 WOLAI */
+  depositSessionToWolai: (sessionId: string) => Promise<{ ok: boolean; url?: string; error?: string }>
+
+  /** 测试 WOLAI 连接 */
+  testWolaiConnection: () => Promise<{ ok: boolean; error?: string; channel?: string; tokenSource?: string; tools?: string[] }>
+
+  /** 浏览 WOLAI 目录（沉淀父页面选择） */
+  listWolaiPages: (options?: { parentId?: string; query?: string }) => Promise<{ ok: boolean; pages: Array<{ id: string; title: string; url?: string }>; channel?: string; error?: string }>
+
+  /** 订阅 Agent 流式事件（返回清理函数） */
+  onAgentStreamEvent: (callback: (event: AgentStreamEvent) => void) => () => void
+
+  /** 订阅 Agent 流式完成事件 */
+  onAgentStreamComplete: (callback: (data: AgentStreamCompletePayload) => void) => () => void
+
+  /** 订阅 Agent 流式错误事件 */
+  onAgentStreamError: (callback: (data: { sessionId: string; error: string }) => void) => () => void
+
+  /** 订阅 Agent 标题自动更新事件 */
+  onAgentTitleUpdated: (callback: (data: { sessionId: string; title: string }) => void) => () => void
+
+  // ===== Agent 权限系统 =====
+
+  /** 响应权限请求 */
+  respondPermission: (response: PermissionResponse) => Promise<void>
+
+  /** 获取工作区权限模式 */
+  getPermissionMode: (workspaceSlug: string) => Promise<PromaPermissionMode>
+
+  /** 设置工作区权限模式 */
+  setPermissionMode: (workspaceSlug: string, mode: PromaPermissionMode) => Promise<void>
+
+  /** 获取全局记忆配置 */
+  getMemoryConfig: () => Promise<MemoryConfig>
+
+  /** 保存全局记忆配置 */
+  setMemoryConfig: (config: MemoryConfig) => Promise<void>
+
+  /** 测试记忆连接 */
+  testMemoryConnection: () => Promise<{ success: boolean; message: string }>
+
+  // ===== AskUserQuestion 交互式问答 =====
+
+  /** 响应 AskUser 请求 */
+  respondAskUser: (response: AskUserResponse) => Promise<void>
+
+  // ===== Agent 附件 =====
+
+  /** 保存文件到 Agent session 工作目录 */
+  saveFilesToAgentSession: (input: AgentSaveFilesInput) => Promise<AgentSavedFile[]>
+
+  /** 打开文件夹选择对话框 */
+  openFolderDialog: () => Promise<{ path: string; name: string } | null>
+
+  /** 复制文件夹到 Agent session 工作目录 */
+  copyFolderToSession: (input: AgentCopyFolderInput) => Promise<AgentSavedFile[]>
+
+  // ===== Agent 文件系统操作 =====
+
+  /** 获取 session 工作路径 */
+  getAgentSessionPath: (workspaceId: string, sessionId: string) => Promise<string | null>
+
+  /** 列出目录内容 */
+  listDirectory: (dirPath: string) => Promise<FileEntry[]>
+
+  /** 删除文件/目录 */
+  deleteFile: (filePath: string) => Promise<void>
+
+  /** 用系统默认应用打开文件 */
+  openFile: (filePath: string) => Promise<void>
+
+  /** 在系统文件管理器中显示文件 */
+  showInFolder: (filePath: string) => Promise<void>
+
+  // ===== 系统提示词管理 =====
+
+  /** 获取系统提示词配置 */
+  getSystemPromptConfig: () => Promise<SystemPromptConfig>
+
+  /** 创建提示词 */
+  createSystemPrompt: (input: SystemPromptCreateInput) => Promise<SystemPrompt>
+
+  /** 更新提示词 */
+  updateSystemPrompt: (id: string, input: SystemPromptUpdateInput) => Promise<SystemPrompt>
+
+  /** 删除提示词 */
+  deleteSystemPrompt: (id: string) => Promise<void>
+
+  /** 更新追加日期时间和用户名开关 */
+  updateAppendSetting: (enabled: boolean) => Promise<void>
+
+  /** 设置默认提示词 */
+  setDefaultPrompt: (id: string | null) => Promise<void>
+
+  // ===== 自动更新相关（可选，仅在 updater 模块存在时可用） =====
+
+  /** 更新 API */
+  updater?: {
+    checkForUpdates: () => Promise<void>
+    downloadUpdate: () => Promise<void>
+    installUpdate: () => Promise<void>
+    getStatus: () => Promise<{
+      status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'installing' | 'error'
+      version?: string
+      releaseNotes?: string
+      progress?: { percent: number; transferred: number; total: number }
+      error?: string
+    }>
+    onStatusChanged: (callback: (status: {
+      status: 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'installing' | 'error'
+      version?: string
+      releaseNotes?: string
+      progress?: { percent: number; transferred: number; total: number }
+      error?: string
+    }) => void) => () => void
+  }
+
+  // GitHub Release
+  getLatestRelease: () => Promise<GitHubRelease | null>
+  listReleases: (options?: GitHubReleaseListOptions) => Promise<GitHubRelease[]>
+  getReleaseByTag: (tag: string) => Promise<GitHubRelease | null>
+
+  // 工作区文件变化通知
+  onCapabilitiesChanged: (callback: () => void) => () => void
+  onWorkspaceFilesChanged: (callback: () => void) => () => void
+}
+
+/**
+ * 实现 ElectronAPI 接口
+ */
+const electronAPI: ElectronAPI = {
+  // 运行时
+  getRuntimeStatus: () => {
+    return ipcRenderer.invoke(IPC_CHANNELS.GET_RUNTIME_STATUS)
+  },
+
+  getGitRepoStatus: (dirPath: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.GET_GIT_REPO_STATUS, dirPath)
+  },
+
+  // 通用工具
+  openExternal: (url: string) => {
+    return ipcRenderer.invoke(IPC_CHANNELS.OPEN_EXTERNAL, url)
+  },
+
+  testNotification: () => ipcRenderer.invoke(SETTINGS_IPC_CHANNELS.TEST_NOTIFICATION),
+
+  // 数据目录与备份迁移
+  getDataOverview: () => ipcRenderer.invoke(DATA_IPC_CHANNELS.INFO),
+  openDataDir: () => ipcRenderer.invoke(DATA_IPC_CHANNELS.OPEN),
+  exportDataBackup: (includeSecrets?: boolean) => ipcRenderer.invoke(DATA_IPC_CHANNELS.EXPORT, includeSecrets),
+  exportDataZip: (includeSecrets?: boolean) => ipcRenderer.invoke(DATA_IPC_CHANNELS.EXPORT_ZIP, includeSecrets),
+  importDataBackup: () => ipcRenderer.invoke(DATA_IPC_CHANNELS.IMPORT),
+
+  getChangelog: () => {
+    return ipcRenderer.invoke(IPC_CHANNELS.GET_CHANGELOG)
+  },
+
+  getAppNotice: () => {
+    return ipcRenderer.invoke(IPC_CHANNELS.GET_APP_NOTICE)
+  },
+
+  getThirdPartyNotices: () => {
+    return ipcRenderer.invoke(IPC_CHANNELS.GET_THIRD_PARTY_NOTICES)
+  },
+
+  // 渠道管理
+  listChannels: () => {
+    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.LIST)
+  },
+
+  createChannel: (input: ChannelCreateInput) => {
+    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.CREATE, input)
+  },
+
+  updateChannel: (id: string, input: ChannelUpdateInput) => {
+    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.UPDATE, id, input)
+  },
+
+  deleteChannel: (id: string) => {
+    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.DELETE, id)
+  },
+
+  decryptApiKey: (channelId: string) => {
+    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.DECRYPT_KEY, channelId)
+  },
+
+  testChannel: (channelId: string) => {
+    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.TEST, channelId)
+  },
+
+  testChannelDirect: (input: FetchModelsInput) => {
+    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.TEST_DIRECT, input)
+  },
+
+  fetchModels: (input: FetchModelsInput) => {
+    return ipcRenderer.invoke(CHANNEL_IPC_CHANNELS.FETCH_MODELS, input)
+  },
+
+  // 对话管理
+  listConversations: () => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.LIST_CONVERSATIONS)
+  },
+
+  createConversation: (title?: string, modelId?: string, channelId?: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.CREATE_CONVERSATION, title, modelId, channelId)
+  },
+
+  getConversationMessages: (id: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.GET_MESSAGES, id)
+  },
+
+  getRecentMessages: (id: string, limit: number) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.GET_RECENT_MESSAGES, id, limit)
+  },
+
+  updateConversationTitle: (id: string, title: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.UPDATE_TITLE, id, title)
+  },
+
+  updateConversationModel: (id: string, modelId: string, channelId: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.UPDATE_MODEL, id, modelId, channelId)
+  },
+
+  deleteConversation: (id: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.DELETE_CONVERSATION, id)
+  },
+
+  togglePinConversation: (id: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.TOGGLE_PIN, id)
+  },
+
+  exportConversationMarkdown: (id: string, title: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.EXPORT_MARKDOWN, id, title)
+  },
+
+  // 消息发送
+  sendMessage: (input: ChatSendInput) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.SEND_MESSAGE, input)
+  },
+
+  stopGeneration: (conversationId: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.STOP_GENERATION, conversationId)
+  },
+
+  deleteMessage: (conversationId: string, messageId: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.DELETE_MESSAGE, conversationId, messageId)
+  },
+
+  truncateMessagesFrom: (
+    conversationId: string,
+    messageId: string,
+    preserveFirstMessageAttachments = false,
+  ) => {
+    return ipcRenderer.invoke(
+      CHAT_IPC_CHANNELS.TRUNCATE_MESSAGES_FROM,
+      conversationId,
+      messageId,
+      preserveFirstMessageAttachments,
+    )
+  },
+
+  updateContextDividers: (conversationId: string, dividers: string[]) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.UPDATE_CONTEXT_DIVIDERS, conversationId, dividers)
+  },
+
+  generateTitle: (input: GenerateTitleInput) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.GENERATE_TITLE, input)
+  },
+
+  // 附件管理
+  saveAttachment: (input: AttachmentSaveInput) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.SAVE_ATTACHMENT, input)
+  },
+
+  readAttachment: (localPath: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.READ_ATTACHMENT, localPath)
+  },
+
+  deleteAttachment: (localPath: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.DELETE_ATTACHMENT, localPath)
+  },
+
+  openFileDialog: () => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.OPEN_FILE_DIALOG)
+  },
+
+  extractAttachmentText: (localPath: string) => {
+    return ipcRenderer.invoke(CHAT_IPC_CHANNELS.EXTRACT_ATTACHMENT_TEXT, localPath)
+  },
+
+  // 用户档案
+  getUserProfile: () => {
+    return ipcRenderer.invoke(USER_PROFILE_IPC_CHANNELS.GET)
+  },
+
+  updateUserProfile: (updates: Partial<UserProfile>) => {
+    return ipcRenderer.invoke(USER_PROFILE_IPC_CHANNELS.UPDATE, updates)
+  },
+
+  // 应用设置
+  getSettings: () => {
+    return ipcRenderer.invoke(SETTINGS_IPC_CHANNELS.GET)
+  },
+
+  getDataDir: () => {
+    return ipcRenderer.invoke(SETTINGS_IPC_CHANNELS.GET_DATA_DIR) as Promise<string>
+  },
+
+  updateSettings: (updates: Partial<AppSettings>) => {
+    return ipcRenderer.invoke(SETTINGS_IPC_CHANNELS.UPDATE, updates)
+  },
+
+  // 安全相关
+  getSecretStatuses: () => {
+    return ipcRenderer.invoke(SECURITY_IPC_CHANNELS.GET_SECRET_STATUS)
+  },
+
+  setSecret: (key: string, value: string) => {
+    return ipcRenderer.invoke(SECURITY_IPC_CHANNELS.SET_SECRET, key, value)
+  },
+
+  getAuditLog: (limit?: number) => {
+    return ipcRenderer.invoke(SECURITY_IPC_CHANNELS.GET_AUDIT_LOG, limit)
+  },
+
+  requestApproval: (request: ApprovalRequest) => {
+    return ipcRenderer.invoke(SECURITY_IPC_CHANNELS.REQUEST_APPROVAL, request)
+  },
+
+  // 效率模块
+  efficiency: {
+    tasks: {
+      list: () => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.TASKS_LIST),
+      create: (input: TaskInput) => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.TASKS_CREATE, input),
+      update: (id: string, patch: Partial<TaskInput>) =>
+        ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.TASKS_UPDATE, id, patch),
+      remove: (id: string) => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.TASKS_REMOVE, id),
+    },
+    todos: {
+      list: () => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.TODOS_LIST),
+      create: (input: TodoInput) => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.TODOS_CREATE, input),
+      update: (id: string, patch: Partial<TodoInput>) =>
+        ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.TODOS_UPDATE, id, patch),
+      remove: (id: string) => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.TODOS_REMOVE, id),
+    },
+    calendar: {
+      list: () => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.EVENTS_LIST),
+      create: (input: EventInput) =>
+        ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.EVENTS_CREATE, input),
+      update: (id: string, patch: Partial<EventInput>) =>
+        ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.EVENTS_UPDATE, id, patch),
+      remove: (id: string) => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.EVENTS_REMOVE, id),
+    },
+    projects: {
+      list: () => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.PROJECTS_LIST),
+      create: (input: ProjectInput) =>
+        ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.PROJECTS_CREATE, input),
+      update: (id: string, patch: Partial<ProjectInput>) =>
+        ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.PROJECTS_UPDATE, id, patch),
+      remove: (id: string) => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.PROJECTS_REMOVE, id),
+    },
+    scheduler: {
+      list: () => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.JOBS_LIST),
+      create: (input: JobInput) => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.JOBS_CREATE, input),
+      update: (id: string, patch: Partial<JobInput>) =>
+        ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.JOBS_UPDATE, id, patch),
+      remove: (id: string) => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.JOBS_REMOVE, id),
+      runNow: (id: string) => ipcRenderer.invoke(EFFICIENCY_IPC_CHANNELS.JOBS_RUN_NOW, id),
+    },
+  },
+
+  // 笔记模块
+  notes: {
+    list: () => ipcRenderer.invoke(NOTE_IPC_CHANNELS.NOTES_LIST),
+    get: (id: string) => ipcRenderer.invoke(NOTE_IPC_CHANNELS.NOTES_GET, id),
+    create: (input?: NoteInput) => ipcRenderer.invoke(NOTE_IPC_CHANNELS.NOTES_CREATE, input ?? {}),
+    update: (id: string, patch: NoteInput) =>
+      ipcRenderer.invoke(NOTE_IPC_CHANNELS.NOTES_UPDATE, id, patch),
+    remove: (id: string) => ipcRenderer.invoke(NOTE_IPC_CHANNELS.NOTES_REMOVE, id),
+    search: (query: string) => ipcRenderer.invoke(NOTE_IPC_CHANNELS.NOTES_SEARCH, query),
+    importImage: (noteId: string, fileName: string, dataUrl: string) =>
+      ipcRenderer.invoke(NOTE_IPC_CHANNELS.NOTES_IMPORT_IMAGE, noteId, fileName, dataUrl),
+    groups: {
+      list: () => ipcRenderer.invoke(NOTE_IPC_CHANNELS.GROUPS_LIST),
+      create: (input: NoteGroupInput) =>
+        ipcRenderer.invoke(NOTE_IPC_CHANNELS.GROUPS_CREATE, input),
+      update: (id: string, patch: Partial<NoteGroupInput>) =>
+        ipcRenderer.invoke(NOTE_IPC_CHANNELS.GROUPS_UPDATE, id, patch),
+      remove: (id: string) => ipcRenderer.invoke(NOTE_IPC_CHANNELS.GROUPS_REMOVE, id),
+    },
+  },
+
+  // 分栏代码预览
+  preview: {
+    load: () => ipcRenderer.invoke(PREVIEW_IPC_CHANNELS.LOAD),
+    save: (state: PlaygroundState) => ipcRenderer.invoke(PREVIEW_IPC_CHANNELS.SAVE, state),
+  },
+
+  // SAP 多环境（arc-1 MCP）
+  sap: {
+    list: () => ipcRenderer.invoke(SAP_IPC_CHANNELS.LIST),
+    create: (input: SapEnvironmentInput) => ipcRenderer.invoke(SAP_IPC_CHANNELS.CREATE, input),
+    update: (id: string, patch: Partial<SapEnvironmentInput>) =>
+      ipcRenderer.invoke(SAP_IPC_CHANNELS.UPDATE, id, patch),
+    remove: (id: string) => ipcRenderer.invoke(SAP_IPC_CHANNELS.REMOVE, id),
+    bindings: (workspaceSlug: string) =>
+      ipcRenderer.invoke(SAP_IPC_CHANNELS.BINDINGS, workspaceSlug),
+    apply: (workspaceSlug: string, envId: string) =>
+      ipcRenderer.invoke(SAP_IPC_CHANNELS.APPLY, workspaceSlug, envId),
+    detach: (workspaceSlug: string, envId: string) =>
+      ipcRenderer.invoke(SAP_IPC_CHANNELS.DETACH, workspaceSlug, envId),
+    importFromCodeBuddy: () => ipcRenderer.invoke(SAP_IPC_CHANNELS.IMPORT),
+    vendor: (envId: string) => ipcRenderer.invoke(SAP_IPC_CHANNELS.VENDOR, envId),
+    runtimeStatus: () => ipcRenderer.invoke(SAP_IPC_CHANNELS.RUNTIME_STATUS),
+  },
+
+  getSystemTheme: () => {
+    return ipcRenderer.invoke(SETTINGS_IPC_CHANNELS.GET_SYSTEM_THEME)
+  },
+
+  onSystemThemeChanged: (callback: (isDark: boolean) => void) => {
+    const listener = (_: unknown, isDark: boolean): void => callback(isDark)
+    ipcRenderer.on(SETTINGS_IPC_CHANNELS.ON_SYSTEM_THEME_CHANGED, listener)
+    return () => { ipcRenderer.removeListener(SETTINGS_IPC_CHANNELS.ON_SYSTEM_THEME_CHANGED, listener) }
+  },
+
+  onNavigateSettings: (callback: () => void) => {
+    const listener = (): void => callback()
+    ipcRenderer.on('menu:navigate-settings', listener)
+    return () => { ipcRenderer.removeListener('menu:navigate-settings', listener) }
+  },
+
+  onNewConversation: (callback: () => void) => {
+    const listener = (): void => callback()
+    ipcRenderer.on('menu:new-conversation', listener)
+    return () => { ipcRenderer.removeListener('menu:new-conversation', listener) }
+  },
+
+  // 环境检测
+  checkEnvironment: () => {
+    return ipcRenderer.invoke(ENVIRONMENT_IPC_CHANNELS.CHECK)
+  },
+
+  // 代理配置
+  getProxySettings: () => {
+    return ipcRenderer.invoke(PROXY_IPC_CHANNELS.GET_SETTINGS)
+  },
+
+  updateProxySettings: (config: ProxyConfig) => {
+    return ipcRenderer.invoke(PROXY_IPC_CHANNELS.UPDATE_SETTINGS, config)
+  },
+
+  detectSystemProxy: () => {
+    return ipcRenderer.invoke(PROXY_IPC_CHANNELS.DETECT_SYSTEM)
+  },
+
+  // 流式事件订阅
+  onStreamChunk: (callback: (event: StreamChunkEvent) => void) => {
+    const listener = (_: unknown, event: StreamChunkEvent): void => callback(event)
+    ipcRenderer.on(CHAT_IPC_CHANNELS.STREAM_CHUNK, listener)
+    return () => { ipcRenderer.removeListener(CHAT_IPC_CHANNELS.STREAM_CHUNK, listener) }
+  },
+
+  onStreamReasoning: (callback: (event: StreamReasoningEvent) => void) => {
+    const listener = (_: unknown, event: StreamReasoningEvent): void => callback(event)
+    ipcRenderer.on(CHAT_IPC_CHANNELS.STREAM_REASONING, listener)
+    return () => { ipcRenderer.removeListener(CHAT_IPC_CHANNELS.STREAM_REASONING, listener) }
+  },
+
+  onStreamComplete: (callback: (event: StreamCompleteEvent) => void) => {
+    const listener = (_: unknown, event: StreamCompleteEvent): void => callback(event)
+    ipcRenderer.on(CHAT_IPC_CHANNELS.STREAM_COMPLETE, listener)
+    return () => { ipcRenderer.removeListener(CHAT_IPC_CHANNELS.STREAM_COMPLETE, listener) }
+  },
+
+  onStreamError: (callback: (event: StreamErrorEvent) => void) => {
+    const listener = (_: unknown, event: StreamErrorEvent): void => callback(event)
+    ipcRenderer.on(CHAT_IPC_CHANNELS.STREAM_ERROR, listener)
+    return () => { ipcRenderer.removeListener(CHAT_IPC_CHANNELS.STREAM_ERROR, listener) }
+  },
+
+  onStreamToolActivity: (callback: (event: StreamToolActivityEvent) => void) => {
+    const listener = (_: unknown, event: StreamToolActivityEvent): void => callback(event)
+    ipcRenderer.on(CHAT_IPC_CHANNELS.STREAM_TOOL_ACTIVITY, listener)
+    return () => { ipcRenderer.removeListener(CHAT_IPC_CHANNELS.STREAM_TOOL_ACTIVITY, listener) }
+  },
+
+  // Agent 会话管理
+  listAgentSessions: () => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_SESSIONS)
+  },
+
+  createAgentSession: (title?: string, channelId?: string, workspaceId?: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.CREATE_SESSION, title, channelId, workspaceId)
+  },
+
+  getAgentSessionMessages: (id: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_MESSAGES, id)
+  },
+
+  updateAgentSessionTitle: (id: string, title: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_TITLE, id, title)
+  },
+
+  deleteAgentSession: (id: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.DELETE_SESSION, id)
+  },
+
+  duplicateAgentSession: (id: string, mode: 'copy' | 'explore' = 'copy') => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.DUPLICATE_SESSION, id, mode)
+  },
+
+  rollbackAgentSession: (id: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.ROLLBACK_SESSION, id)
+  },
+
+  setAgentSessionFlags: (id: string, flags: { isTodo?: boolean; isExplore?: boolean }) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.SET_SESSION_FLAGS, id, flags)
+  },
+
+  exportAgentSessionMarkdown: (id: string, title: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.EXPORT_MARKDOWN, id, title)
+  },
+
+  generateAgentTitle: (input: AgentGenerateTitleInput) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GENERATE_TITLE, input)
+  },
+
+  sendAgentMessage: (input: AgentSendInput) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.SEND_MESSAGE, input)
+  },
+
+  stopAgent: (sessionId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.STOP_AGENT, sessionId)
+  },
+
+  // Agent 后台任务管理
+  getTaskOutput: (input: GetTaskOutputInput) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_TASK_OUTPUT, input)
+  },
+
+  stopTask: (input: StopTaskInput) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.STOP_TASK, input)
+  },
+
+  // Agent 工作区管理
+  listAgentWorkspaces: () => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_WORKSPACES)
+  },
+
+  createAgentWorkspace: (name: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.CREATE_WORKSPACE, name)
+  },
+
+  updateAgentWorkspace: (id: string, updates: { name: string }) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.UPDATE_WORKSPACE, id, updates)
+  },
+
+  deleteAgentWorkspace: (id: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.DELETE_WORKSPACE, id)
+  },
+
+  // 工作区能力（MCP + Skill）
+  getWorkspaceCapabilities: (workspaceSlug: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_CAPABILITIES, workspaceSlug)
+  },
+
+  getWorkspaceMcpConfig: (workspaceSlug: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_MCP_CONFIG, workspaceSlug)
+  },
+
+  saveWorkspaceMcpConfig: (workspaceSlug: string, config: WorkspaceMcpConfig) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.SAVE_MCP_CONFIG, workspaceSlug, config)
+  },
+
+  testMcpServer: (name: string, entry: import('@proma/shared').McpServerEntry) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.TEST_MCP_SERVER, name, entry) as Promise<{ success: boolean; message: string }>
+  },
+
+  getWorkspaceSkills: (workspaceSlug: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_SKILLS, workspaceSlug)
+  },
+
+  deleteWorkspaceSkill: (workspaceSlug: string, skillSlug: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.DELETE_SKILL, workspaceSlug, skillSlug)
+  },
+
+  copyWorkspaceSkillAsPersonal: (workspaceSlug: string, skillSlug: string, newName: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.COPY_SKILL_AS_PERSONAL, workspaceSlug, skillSlug, newName)
+  },
+
+  scanLocalCapabilities: (workspaceSlug: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.SCAN_LOCAL_CAPABILITIES, workspaceSlug)
+  },
+
+  importMcpServers: (workspaceSlug: string, servers: Record<string, import('@proma/shared').McpServerEntry>) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.IMPORT_MCP_SERVERS, workspaceSlug, servers)
+  },
+
+  importSkills: (workspaceSlug: string, sources: Array<{ path: string; name: string }>) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.IMPORT_SKILLS, workspaceSlug, sources)
+  },
+
+  depositSessionToWolai: (sessionId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.WOLAI_DEPOSIT, sessionId) as Promise<{ ok: boolean; url?: string; error?: string }>
+  },
+
+  testWolaiConnection: () => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.WOLAI_TEST) as Promise<{ ok: boolean; error?: string; channel?: string; tokenSource?: string; tools?: string[] }>
+  },
+
+  /** 浏览 WOLAI 目录（沉淀父页面选择） */
+  listWolaiPages: (options?: { parentId?: string; query?: string }) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.WOLAI_LIST_PAGES, options) as Promise<{ ok: boolean; pages: Array<{ id: string; title: string; url?: string }>; channel?: string; error?: string }>
+  },
+
+  onAgentStreamEvent: (callback: (event: AgentStreamEvent) => void) => {
+    const listener = (_: unknown, event: AgentStreamEvent): void => callback(event)
+    ipcRenderer.on(AGENT_IPC_CHANNELS.STREAM_EVENT, listener)
+    return () => { ipcRenderer.removeListener(AGENT_IPC_CHANNELS.STREAM_EVENT, listener) }
+  },
+
+  onAgentStreamComplete: (callback: (data: AgentStreamCompletePayload) => void) => {
+    const listener = (_: unknown, data: AgentStreamCompletePayload): void => callback(data)
+    ipcRenderer.on(AGENT_IPC_CHANNELS.STREAM_COMPLETE, listener)
+    return () => { ipcRenderer.removeListener(AGENT_IPC_CHANNELS.STREAM_COMPLETE, listener) }
+  },
+
+  onAgentStreamError: (callback: (data: { sessionId: string; error: string }) => void) => {
+    const listener = (_: unknown, data: { sessionId: string; error: string }): void => callback(data)
+    ipcRenderer.on(AGENT_IPC_CHANNELS.STREAM_ERROR, listener)
+    return () => { ipcRenderer.removeListener(AGENT_IPC_CHANNELS.STREAM_ERROR, listener) }
+  },
+
+  // 标题自动更新通知
+  onAgentTitleUpdated: (callback: (data: { sessionId: string; title: string }) => void) => {
+    const listener = (_: unknown, data: { sessionId: string; title: string }): void => callback(data)
+    ipcRenderer.on(AGENT_IPC_CHANNELS.TITLE_UPDATED, listener)
+    return () => { ipcRenderer.removeListener(AGENT_IPC_CHANNELS.TITLE_UPDATED, listener) }
+  },
+
+  // Agent 权限系统
+  respondPermission: (response: PermissionResponse) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.PERMISSION_RESPOND, response)
+  },
+
+  getPermissionMode: (workspaceSlug: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_PERMISSION_MODE, workspaceSlug)
+  },
+
+  setPermissionMode: (workspaceSlug: string, mode: PromaPermissionMode) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.SET_PERMISSION_MODE, workspaceSlug, mode)
+  },
+
+  getMemoryConfig: () => {
+    return ipcRenderer.invoke(MEMORY_IPC_CHANNELS.GET_CONFIG)
+  },
+
+  setMemoryConfig: (config: MemoryConfig) => {
+    return ipcRenderer.invoke(MEMORY_IPC_CHANNELS.SET_CONFIG, config)
+  },
+
+  testMemoryConnection: () => {
+    return ipcRenderer.invoke(MEMORY_IPC_CHANNELS.TEST_CONNECTION)
+  },
+
+  // AskUserQuestion 交互式问答
+  respondAskUser: (response: AskUserResponse) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.ASK_USER_RESPOND, response)
+  },
+
+  // 工作区文件变化通知
+  onCapabilitiesChanged: (callback: () => void) => {
+    const listener = (): void => callback()
+    ipcRenderer.on(AGENT_IPC_CHANNELS.CAPABILITIES_CHANGED, listener)
+    return () => { ipcRenderer.removeListener(AGENT_IPC_CHANNELS.CAPABILITIES_CHANGED, listener) }
+  },
+
+  onWorkspaceFilesChanged: (callback: () => void) => {
+    const listener = (): void => callback()
+    ipcRenderer.on(AGENT_IPC_CHANNELS.WORKSPACE_FILES_CHANGED, listener)
+    return () => { ipcRenderer.removeListener(AGENT_IPC_CHANNELS.WORKSPACE_FILES_CHANGED, listener) }
+  },
+
+  // Agent 附件
+  saveFilesToAgentSession: (input: AgentSaveFilesInput) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.SAVE_FILES_TO_SESSION, input)
+  },
+
+  openFolderDialog: () => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.OPEN_FOLDER_DIALOG)
+  },
+
+  copyFolderToSession: (input: AgentCopyFolderInput) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.COPY_FOLDER_TO_SESSION, input)
+  },
+
+  // Agent 文件系统操作
+  getAgentSessionPath: (workspaceId: string, sessionId: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_SESSION_PATH, workspaceId, sessionId)
+  },
+
+  listDirectory: (dirPath: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.LIST_DIRECTORY, dirPath)
+  },
+
+  deleteFile: (filePath: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.DELETE_FILE, filePath)
+  },
+
+  openFile: (filePath: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.OPEN_FILE, filePath)
+  },
+
+  showInFolder: (filePath: string) => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.SHOW_IN_FOLDER, filePath)
+  },
+
+  // 系统提示词管理
+  getSystemPromptConfig: () => {
+    return ipcRenderer.invoke(SYSTEM_PROMPT_IPC_CHANNELS.GET_CONFIG)
+  },
+
+  createSystemPrompt: (input: SystemPromptCreateInput) => {
+    return ipcRenderer.invoke(SYSTEM_PROMPT_IPC_CHANNELS.CREATE, input)
+  },
+
+  updateSystemPrompt: (id: string, input: SystemPromptUpdateInput) => {
+    return ipcRenderer.invoke(SYSTEM_PROMPT_IPC_CHANNELS.UPDATE, id, input)
+  },
+
+  deleteSystemPrompt: (id: string) => {
+    return ipcRenderer.invoke(SYSTEM_PROMPT_IPC_CHANNELS.DELETE, id)
+  },
+
+  updateAppendSetting: (enabled: boolean) => {
+    return ipcRenderer.invoke(SYSTEM_PROMPT_IPC_CHANNELS.UPDATE_APPEND_SETTING, enabled)
+  },
+
+  setDefaultPrompt: (id: string | null) => {
+    return ipcRenderer.invoke(SYSTEM_PROMPT_IPC_CHANNELS.SET_DEFAULT, id)
+  },
+
+  // 自动更新（updater 模块为可选，bridge 始终暴露，IPC 调用失败时由渲染进程处理）
+  updater: {
+    checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+    downloadUpdate: () => ipcRenderer.invoke('updater:download'),
+    installUpdate: () => ipcRenderer.invoke('updater:install'),
+    getStatus: () => ipcRenderer.invoke('updater:get-status'),
+    onStatusChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, status: Parameters<typeof callback>[0]): void => callback(status)
+      ipcRenderer.on('updater:status-changed', listener)
+      return () => { ipcRenderer.removeListener('updater:status-changed', listener) }
+    },
+  },
+
+  // GitHub Release
+  getLatestRelease: () => {
+    return ipcRenderer.invoke(GITHUB_RELEASE_IPC_CHANNELS.GET_LATEST_RELEASE)
+  },
+
+  listReleases: (options) => {
+    return ipcRenderer.invoke(GITHUB_RELEASE_IPC_CHANNELS.LIST_RELEASES, options)
+  },
+
+  getReleaseByTag: (tag) => {
+    return ipcRenderer.invoke(GITHUB_RELEASE_IPC_CHANNELS.GET_RELEASE_BY_TAG, tag)
+  },
+}
+
+// 将 API 暴露到渲染进程的 window 对象上
+contextBridge.exposeInMainWorld('electronAPI', electronAPI)
+
+// 扩展 Window 接口的类型定义
+declare global {
+  interface Window {
+    electronAPI: ElectronAPI
+  }
+}
