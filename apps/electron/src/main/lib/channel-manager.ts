@@ -1,0 +1,614 @@
+/**
+ * 渠道管理器
+ *
+ * 负责渠道的 CRUD 操作、连接测试。
+ * API Key 以明文存储在 ~/.proma/channels.json（本地优先，无需 OS 钥匙串）。
+ */
+
+import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { getChannelsPath } from './config-paths'
+import type {
+  Channel,
+  ChannelCreateInput,
+  ChannelUpdateInput,
+  ChannelsConfig,
+  ChannelTestResult,
+  ChannelModel,
+  FetchModelsInput,
+  FetchModelsResult,
+  ProviderType,
+} from '@proma/shared'
+import { getFetchFn } from './proxy-fetch'
+import { getEffectiveProxyUrl } from './proxy-settings-service'
+
+/** 当前配置版本 */
+const CONFIG_VERSION = 1
+
+// ===== URL 规范化工具 =====
+
+/**
+ * 规范化 Anthropic Base URL
+ *
+ * 处理逻辑：
+ * - 去除尾部斜杠
+ * - 确保包含 /v1（如果用户没填则自动补上）
+ * - 如果已经包含 /v1 则不重复添加
+ *
+ * 最终结果类似 https://api.anthropic.com/v1
+ */
+function normalizeAnthropicBaseUrl(baseUrl: string): string {
+  let url = baseUrl.trim().replace(/\/+$/, '')
+  // 去除用户误填的 /messages 后缀，避免后续拼接时路径重复
+  url = url.replace(/\/messages$/, '')
+  if (!url.match(/\/v\d+$/)) {
+    url = `${url}/v1`
+  }
+  return url
+}
+
+/**
+ * 规范化通用 Base URL（去除尾部斜杠）
+ */
+function normalizeBaseUrl(baseUrl: string): string {
+  return baseUrl.trim().replace(/\/+$/, '')
+}
+
+/**
+ * 读取渠道配置文件
+ */
+function readConfig(): ChannelsConfig {
+  const configPath = getChannelsPath()
+
+  if (!existsSync(configPath)) {
+    return { version: CONFIG_VERSION, channels: [] }
+  }
+
+  try {
+    const raw = readFileSync(configPath, 'utf-8')
+    return JSON.parse(raw) as ChannelsConfig
+  } catch (error) {
+    console.error('[渠道管理] 读取配置文件失败:', error)
+    return { version: CONFIG_VERSION, channels: [] }
+  }
+}
+
+/**
+ * 写入渠道配置文件
+ */
+function writeConfig(config: ChannelsConfig): void {
+  const configPath = getChannelsPath()
+
+  try {
+    writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8')
+  } catch (error) {
+    console.error('[渠道管理] 写入配置文件失败:', error)
+    throw new Error('写入渠道配置失败')
+  }
+}
+
+/**
+ * 存储 API Key（明文直接返回，不再使用 OS 钥匙串加密）
+ */
+function encryptApiKey(plainKey: string): string {
+  return plainKey
+}
+
+/**
+ * 读取 API Key
+ *
+ * 兼容旧版 safeStorage 加密数据：如果解码 base64 后不是合法 UTF-8 文本，
+ * 说明是旧版加密数据，此时返回原值（用户需重新输入 Key）。
+ */
+function decryptKey(storedKey: string): string {
+  return storedKey
+}
+
+/**
+ * 获取所有渠道
+ *
+ * 返回的渠道中 apiKey 保持加密状态。
+ */
+export function listChannels(): Channel[] {
+  const config = readConfig()
+  return config.channels
+}
+
+/**
+ * 按 ID 获取渠道
+ *
+ * 返回的渠道中 apiKey 保持加密状态。
+ */
+export function getChannelById(id: string): Channel | undefined {
+  const config = readConfig()
+  return config.channels.find((c) => c.id === id)
+}
+
+/**
+ * 创建新渠道
+ *
+ * @param input 渠道创建数据（apiKey 为明文，会自动加密）
+ * @returns 创建后的渠道（apiKey 为加密态）
+ */
+export function createChannel(input: ChannelCreateInput): Channel {
+  const config = readConfig()
+  const now = Date.now()
+
+  const channel: Channel = {
+    id: randomUUID(),
+    name: input.name,
+    provider: input.provider,
+    baseUrl: input.baseUrl,
+    apiKey: encryptApiKey(input.apiKey),
+    ...(input.iconUrl ? { iconUrl: input.iconUrl } : {}),
+    models: input.models,
+    enabled: input.enabled,
+    createdAt: now,
+    updatedAt: now,
+  }
+
+  config.channels.push(channel)
+  writeConfig(config)
+
+  console.log(`[渠道管理] 已创建渠道: ${channel.name} (${channel.id})`)
+  return channel
+}
+
+/**
+ * 更新渠道
+ *
+ * @param id 渠道 ID
+ * @param input 更新数据（apiKey 为明文，空字符串表示不更新）
+ * @returns 更新后的渠道
+ */
+export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
+  const config = readConfig()
+  const index = config.channels.findIndex((c) => c.id === id)
+
+  if (index === -1) {
+    throw new Error(`渠道不存在: ${id}`)
+  }
+
+  const existing = config.channels[index]!
+
+  const updated: Channel = {
+    ...existing,
+    name: input.name ?? existing.name,
+    provider: input.provider ?? existing.provider,
+    baseUrl: input.baseUrl ?? existing.baseUrl,
+    apiKey: input.apiKey ? encryptApiKey(input.apiKey) : existing.apiKey,
+    iconUrl: input.iconUrl !== undefined ? (input.iconUrl || undefined) : existing.iconUrl,
+    models: input.models ?? existing.models,
+    enabled: input.enabled ?? existing.enabled,
+    updatedAt: Date.now(),
+  }
+
+  config.channels[index] = updated
+  writeConfig(config)
+
+  console.log(`[渠道管理] 已更新渠道: ${updated.name} (${updated.id})`)
+  return updated
+}
+
+/**
+ * 删除渠道
+ */
+export function deleteChannel(id: string): void {
+  const config = readConfig()
+  const index = config.channels.findIndex((c) => c.id === id)
+
+  if (index === -1) {
+    throw new Error(`渠道不存在: ${id}`)
+  }
+
+  const removed = config.channels.splice(index, 1)[0]!
+  writeConfig(config)
+
+  console.log(`[渠道管理] 已删除渠道: ${removed.name} (${removed.id})`)
+}
+
+/**
+ * 解密渠道的 API Key
+ *
+ * 仅在用户需要查看时调用。
+ */
+export function decryptApiKey(channelId: string): string {
+  const config = readConfig()
+  const channel = config.channels.find((c) => c.id === channelId)
+
+  if (!channel) {
+    throw new Error(`渠道不存在: ${channelId}`)
+  }
+
+  return decryptKey(channel.apiKey)
+}
+
+/**
+ * 测试渠道连接
+ *
+ * 向供应商的 API 发送简单请求，验证 API Key 和连接是否有效。
+ */
+export async function testChannel(channelId: string): Promise<ChannelTestResult> {
+  const config = readConfig()
+  const channel = config.channels.find((c) => c.id === channelId)
+
+  if (!channel) {
+    return { success: false, message: '渠道不存在' }
+  }
+
+  const apiKey = decryptKey(channel.apiKey)
+  const proxyUrl = await getEffectiveProxyUrl()
+  // 使用渠道中已启用的第一个模型测试，避免"测试通过但对话失败"
+  const testModel = channel.models.find((m) => m.enabled)?.id ?? channel.models[0]?.id
+
+  try {
+    switch (channel.provider) {
+      case 'anthropic':
+        return await testAnthropic(channel.baseUrl, apiKey, proxyUrl, testModel)
+      case 'openai':
+      case 'deepseek':
+      case 'moonshot':
+      case 'zhipu':
+      case 'minimax':
+      case 'doubao':
+      case 'qwen':
+      case 'custom':
+        return await testOpenAICompatible(channel.baseUrl, apiKey, proxyUrl)
+      case 'google':
+        return await testGoogle(channel.baseUrl, apiKey, proxyUrl)
+      default:
+        return { success: false, message: `不支持的供应商: ${channel.provider}` }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '未知错误'
+    return { success: false, message: `连接测试失败: ${message}` }
+  }
+}
+
+/**
+ * 测试 Anthropic API 连接
+ *
+ * 使用渠道真实模型发送一条最小请求：仅"能收到响应"不代表可用，
+ * 因此非 2xx 一律视为失败，并返回状态码与响应片段便于排查。
+ */
+async function testAnthropic(
+  baseUrl: string,
+  apiKey: string,
+  proxyUrl?: string,
+  model?: string,
+): Promise<ChannelTestResult> {
+  const url = `${normalizeAnthropicBaseUrl(baseUrl)}/messages`
+  const fetchFn = getFetchFn(proxyUrl)
+  const testModel = model?.trim() || 'claude-sonnet-4-5-20250929'
+  const startedAt = Date.now()
+
+  const response = await fetchFn(url, {
+    method: 'POST',
+    headers: {
+      'x-api-key': apiKey,
+      Authorization: `Bearer ${apiKey}`,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: testModel,
+      max_tokens: 1,
+      messages: [{ role: 'user', content: 'hi' }],
+    }),
+  })
+
+  const latencyMs = Date.now() - startedAt
+  const base = { status: response.status, endpoint: url, model: testModel, latencyMs }
+
+  if (response.ok) {
+    return { success: true, message: `连接成功（模型 ${testModel}）`, ...base }
+  }
+
+  const text = await response.text().catch(() => '')
+  const snippet = text.replace(/\s+/g, ' ').slice(0, 300)
+  const rejected =
+    response.status === 401 ||
+    response.status === 403 ||
+    /not allowed|unauthorized|invalid[^,]{0,20}key/i.test(snippet)
+
+  const hint = rejected
+    ? ' 请确认 Base URL 是该模型实际可用的服务地址（使用中转网关时需填写网关地址），且 API Key 属于该地址。'
+    : /anthropic\.com/i.test(baseUrl) && model && !/^claude/i.test(model)
+      ? ' 当前模型名不是 Anthropic 官方模型，如使用中转网关请把 Base URL 改为网关地址。'
+      : ''
+
+  return {
+    success: false,
+    message: `请求失败 (${response.status})${snippet ? `：${snippet}` : ''}${hint}`,
+    ...base,
+  }
+}
+
+/**
+ * 测试 OpenAI 兼容 API 连接（OpenAI / DeepSeek / Custom）
+ */
+async function testOpenAICompatible(baseUrl: string, apiKey: string, proxyUrl?: string): Promise<ChannelTestResult> {
+  const url = `${normalizeBaseUrl(baseUrl)}/models`
+  const fetchFn = getFetchFn(proxyUrl)
+  const startedAt = Date.now()
+
+  const response = await fetchFn(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+    },
+  })
+
+  const latencyMs = Date.now() - startedAt
+  const base = { status: response.status, endpoint: url, latencyMs }
+
+  if (response.ok) {
+    return { success: true, message: '连接成功', ...base }
+  }
+
+  if (response.status === 401) {
+    return { success: false, message: 'API Key 无效', ...base }
+  }
+
+  const text = await response.text().catch(() => '')
+  return { success: false, message: `请求失败 (${response.status}): ${text.slice(0, 200)}`, ...base }
+}
+
+/**
+ * 测试 Google Generative AI API 连接
+ */
+async function testGoogle(baseUrl: string, apiKey: string, proxyUrl?: string): Promise<ChannelTestResult> {
+  const url = normalizeBaseUrl(baseUrl)
+  const fetchFn = getFetchFn(proxyUrl)
+
+  const response = await fetchFn(`${url}/v1beta/models?key=${apiKey}`, {
+    method: 'GET',
+  })
+
+  if (response.ok) {
+    return { success: true, message: '连接成功' }
+  }
+
+  if (response.status === 400 || response.status === 403) {
+    return { success: false, message: 'API Key 无效' }
+  }
+
+  const text = await response.text().catch(() => '')
+  return { success: false, message: `请求失败 (${response.status}): ${text.slice(0, 200)}` }
+}
+
+// ===== 直接测试连接 =====
+
+/**
+ * 直接测试连接（无需已保存渠道）
+ *
+ * 使用传入的明文凭证直接向提供商发送测试请求。
+ * 适用于创建/编辑渠道时用户在保存前先验证连接。
+ */
+export async function testChannelDirect(input: FetchModelsInput): Promise<ChannelTestResult> {
+  const proxyUrl = await getEffectiveProxyUrl()
+
+  try {
+    switch (input.provider) {
+      case 'anthropic':
+        return await testAnthropic(input.baseUrl, input.apiKey, proxyUrl, input.model)
+      case 'openai':
+      case 'deepseek':
+      case 'moonshot':
+      case 'zhipu':
+      case 'minimax':
+      case 'doubao':
+      case 'qwen':
+      case 'custom':
+        return await testOpenAICompatible(input.baseUrl, input.apiKey, proxyUrl)
+      case 'google':
+        return await testGoogle(input.baseUrl, input.apiKey, proxyUrl)
+      default:
+        return { success: false, message: `不支持的提供商: ${input.provider}` }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '未知错误'
+    return { success: false, message: `连接测试失败: ${message}` }
+  }
+}
+
+// ===== 模型拉取相关 =====
+
+/**
+ * 从供应商 API 拉取可用模型列表
+ *
+ * 直接使用传入的凭证（无需已保存渠道），支持创建渠道时预先拉取模型。
+ * 针对不同供应商使用不同的 API 端点和响应解析。
+ */
+export async function fetchModels(input: FetchModelsInput): Promise<FetchModelsResult> {
+  const proxyUrl = await getEffectiveProxyUrl()
+
+  try {
+    switch (input.provider) {
+      case 'anthropic':
+        return await fetchAnthropicModels(input.baseUrl, input.apiKey, proxyUrl)
+      case 'openai':
+      case 'deepseek':
+      case 'moonshot':
+      case 'zhipu':
+      case 'minimax':
+      case 'doubao':
+      case 'qwen':
+      case 'custom':
+        return await fetchOpenAICompatibleModels(input.baseUrl, input.apiKey, proxyUrl)
+      case 'google':
+        return await fetchGoogleModels(input.baseUrl, input.apiKey, proxyUrl)
+      default:
+        return { success: false, message: `不支持的供应商: ${input.provider}`, models: [] }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '未知错误'
+    console.error('[渠道管理] 拉取模型列表失败:', error)
+    return { success: false, message: `拉取模型失败: ${message}`, models: [] }
+  }
+}
+
+/**
+ * Anthropic API 模型响应项
+ */
+interface AnthropicModelItem {
+  id: string
+  display_name?: string
+  type?: string
+}
+
+/**
+ * 从 Anthropic API 拉取模型列表
+ *
+ * 先规范化 baseUrl 确保包含 /v1，再请求 /models。
+ * 文档: https://docs.anthropic.com/en/api/models-list
+ */
+async function fetchAnthropicModels(baseUrl: string, apiKey: string, proxyUrl?: string): Promise<FetchModelsResult> {
+  const url = normalizeAnthropicBaseUrl(baseUrl)
+  const fetchFn = getFetchFn(proxyUrl)
+
+  const response = await fetchFn(`${url}/models`, {
+    method: 'GET',
+    headers: {
+      'x-api-key': apiKey,
+      Authorization: `Bearer ${apiKey}`,
+      'anthropic-version': '2023-06-01',
+    },
+  })
+
+  if (response.status === 401) {
+    const text = await response.text().catch(() => '')
+    return { success: false, message: `API Key 无效${text ? `: ${text.slice(0, 150)}` : ''}`, models: [] }
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    return { success: false, message: `请求失败 (${response.status}): ${text.slice(0, 200)}`, models: [] }
+  }
+
+  const data = await response.json() as { data?: AnthropicModelItem[] }
+  const items = data.data ?? []
+
+  const models: ChannelModel[] = items.map((item) => ({
+    id: item.id,
+    name: item.display_name || item.id,
+    enabled: true,
+  }))
+
+  return {
+    success: true,
+    message: `成功获取 ${models.length} 个模型`,
+    models,
+  }
+}
+
+/**
+ * OpenAI 兼容 API 模型响应项
+ */
+interface OpenAIModelItem {
+  id: string
+  owned_by?: string
+}
+
+/**
+ * 从 OpenAI 兼容 API 拉取模型列表（OpenAI / DeepSeek / Custom）
+ *
+ * API: GET {baseUrl}/models
+ * 通用 OpenAI 兼容格式，适用于大部分第三方供应商。
+ */
+async function fetchOpenAICompatibleModels(baseUrl: string, apiKey: string, proxyUrl?: string): Promise<FetchModelsResult> {
+  const url = normalizeBaseUrl(baseUrl)
+  const fetchFn = getFetchFn(proxyUrl)
+
+  const response = await fetchFn(`${url}/models`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+    },
+  })
+
+  if (response.status === 401) {
+    return { success: false, message: 'API Key 无效', models: [] }
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    return { success: false, message: `请求失败 (${response.status}): ${text.slice(0, 200)}`, models: [] }
+  }
+
+  const data = await response.json() as { data?: OpenAIModelItem[] }
+  const items = data.data ?? []
+
+  const models: ChannelModel[] = items.map((item) => ({
+    id: item.id,
+    name: item.id,
+    enabled: true,
+  }))
+
+  // 按模型 ID 字母排序，方便用户查找
+  models.sort((a, b) => a.id.localeCompare(b.id))
+
+  return {
+    success: true,
+    message: `成功获取 ${models.length} 个模型`,
+    models,
+  }
+}
+
+/**
+ * Google Generative AI 模型响应项
+ */
+interface GoogleModelItem {
+  name: string
+  displayName?: string
+  description?: string
+  supportedGenerationMethods?: string[]
+}
+
+/**
+ * 从 Google Generative AI API 拉取模型列表
+ *
+ * API: GET /v1beta/models?key={apiKey}
+ * 仅返回支持 generateContent 的模型（排除纯 embedding 模型）。
+ */
+async function fetchGoogleModels(baseUrl: string, apiKey: string, proxyUrl?: string): Promise<FetchModelsResult> {
+  const url = normalizeBaseUrl(baseUrl)
+  const fetchFn = getFetchFn(proxyUrl)
+
+  const response = await fetchFn(`${url}/v1beta/models?key=${apiKey}`, {
+    method: 'GET',
+  })
+
+  if (response.status === 400 || response.status === 403) {
+    return { success: false, message: 'API Key 无效', models: [] }
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    return { success: false, message: `请求失败 (${response.status}): ${text.slice(0, 200)}`, models: [] }
+  }
+
+  const data = await response.json() as { models?: GoogleModelItem[] }
+  const items = data.models ?? []
+
+  // 过滤出支持 generateContent 的模型（排除纯 embedding 模型）
+  const chatModels = items.filter((item) =>
+    item.supportedGenerationMethods?.includes('generateContent')
+  )
+
+  const models: ChannelModel[] = chatModels.map((item) => {
+    // Google 模型 name 格式为 "models/gemini-pro"，提取实际 ID
+    const id = item.name.replace(/^models\//, '')
+    return {
+      id,
+      name: item.displayName || id,
+      enabled: true,
+    }
+  })
+
+  return {
+    success: true,
+    message: `成功获取 ${models.length} 个模型`,
+    models,
+  }
+}
